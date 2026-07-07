@@ -65,16 +65,14 @@ verify_checksum() {
   local file=$2
   [[ "$VERIFY_CHECKSUMS" == "1" ]] || return 0
 
-  local checksums
+  local checksums expected actual
   checksums="$(mktemp)"
-  trap 'rm -f "$checksums"' RETURN
   try_fetch "$(download_url checksums.txt)" "$checksums"
-
-  local expected
   expected="$(awk -v f="$asset" '$2 == f { print $1; exit }' "$checksums")"
+  rm -f "$checksums"
+
   [[ -n "$expected" ]] || die "checksums.txt has no entry for ${asset}"
 
-  local actual
   if command -v shasum >/dev/null 2>&1; then
     actual="$(shasum -a 256 "$file" | awk '{print $1}')"
   elif command -v sha256sum >/dev/null 2>&1; then
