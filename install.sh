@@ -149,7 +149,7 @@ Add to your shell profile:
 Then run:
 
   causet version
-  causet-compiler --version
+  causet-compiler about
 EOF
 }
 
