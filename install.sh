@@ -11,6 +11,10 @@ REPO="${CAUSET_REPO:-Causet-Inc/causet-cli}"
 INSTALL_DIR="${CAUSET_INSTALL_DIR:-${HOME}/.causet/bin}"
 VERSION="${CAUSET_VERSION:-}"
 VERIFY_CHECKSUMS="${CAUSET_VERIFY_CHECKSUMS:-1}"
+SKIP_SHELL_SETUP="${CAUSET_SKIP_SHELL_SETUP:-0}"
+
+CONFIG_BEGIN="# >>> causet shell setup >>>"
+CONFIG_END="# <<< causet shell setup <<<"
 
 die() {
   echo "error: $*" >&2
@@ -130,6 +134,63 @@ install_compiler_with_fallback() {
   die "could not download compiler for ${OS}/${ARCH}"
 }
 
+upsert_shell_block() {
+  local rc_file=$1
+  local block=$2
+
+  mkdir -p "$(dirname "$rc_file")"
+  touch "$rc_file"
+
+  if grep -qF "$CONFIG_BEGIN" "$rc_file" 2>/dev/null; then
+    echo "Shell setup already present in ${rc_file}"
+    return 0
+  fi
+
+  {
+    echo ""
+    echo "$CONFIG_BEGIN"
+    printf '%s\n' "$block"
+    echo "$CONFIG_END"
+  } >>"$rc_file"
+  echo "Updated ${rc_file}"
+}
+
+setup_shell() {
+  [[ "$SKIP_SHELL_SETUP" == "1" ]] && return 0
+
+  local causet_bin="${INSTALL_DIR}/causet"
+  local shell_name path_line completion_line block
+
+  shell_name="$(basename "${SHELL:-}")"
+  path_line="export PATH=\"${INSTALL_DIR}:\$PATH\""
+
+  case "$shell_name" in
+    zsh)
+      completion_line="eval \"\$(${causet_bin} completion zsh)\""
+      block="${path_line}
+${completion_line}"
+      upsert_shell_block "${ZDOTDIR:-$HOME}/.zshrc" "$block"
+      ;;
+    bash)
+      completion_line="eval \"\$(${causet_bin} completion bash)\""
+      block="${path_line}
+${completion_line}"
+      upsert_shell_block "$HOME/.bashrc" "$block"
+      ;;
+    fish)
+      mkdir -p "$HOME/.config/fish/completions"
+      "$causet_bin" completion fish >"$HOME/.config/fish/completions/causet.fish"
+      echo "Wrote fish completion to ${HOME}/.config/fish/completions/causet.fish"
+      upsert_shell_block "$HOME/.config/fish/config.fish" "fish_add_path ${INSTALL_DIR}"
+      ;;
+    *)
+      echo "note: add PATH and completion manually for ${shell_name}:"
+      echo "  ${path_line}"
+      echo "  eval \"\$(${causet_bin} completion ${shell_name})\""
+      ;;
+  esac
+}
+
 main() {
   require_cmd uname
   detect_platform
@@ -137,19 +198,25 @@ main() {
   local cli_asset="causet-${OS}-${ARCH}"
   install_asset "$cli_asset" "causet"
   install_compiler_with_fallback
+  setup_shell
 
   cat <<EOF
 
 Causet CLI installed to ${INSTALL_DIR}
 
-Add to your shell profile:
+Shell PATH and tab completion were added to your shell config when supported
+(zsh, bash, fish). Open a new terminal or run:
 
-  export PATH="${INSTALL_DIR}:\$PATH"
+  source ~/.zshrc    # zsh
+  source ~/.bashrc   # bash
 
 Then run:
 
   causet version
   causet-compiler about
+  causet <TAB>       # tab completion for subcommands and flags
+
+Set CAUSET_SKIP_SHELL_SETUP=1 to skip profile updates.
 EOF
 }
 
