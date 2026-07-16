@@ -2,8 +2,16 @@
 # Install Causet CLI + compiler from public GitHub Releases (Causet-Inc/causet-cli).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Causet-Inc/causet-cli/main/install.sh | bash
-#   CAUSET_VERSION=v1.0.2 curl -fsSL ... | bash
+#   curl -fsSL https://install.causet.io/install.sh | bash
+#   curl -fsSL https://install.causet.io/install.sh | env CAUSET_VERSION=v10.0.12 bash
+#   export CAUSET_VERSION=v10.0.12 && curl -fsSL https://install.causet.io/install.sh | bash
+#
+# Do not use:
+#   CAUSET_VERSION=v10.0.12 curl ... | bash
+# that only sets the variable for curl, not for bash.
+#
+# Also published at:
+#   https://raw.githubusercontent.com/Causet-Inc/causet-cli/main/install.sh
 #
 set -euo pipefail
 
@@ -12,9 +20,24 @@ INSTALL_DIR="${CAUSET_INSTALL_DIR:-${HOME}/.causet/bin}"
 VERSION="${CAUSET_VERSION:-}"
 VERIFY_CHECKSUMS="${CAUSET_VERIFY_CHECKSUMS:-1}"
 SKIP_SHELL_SETUP="${CAUSET_SKIP_SHELL_SETUP:-0}"
+SKIP_COMPILER="${CAUSET_SKIP_COMPILER:-0}"
 
 CONFIG_BEGIN="# >>> causet shell setup >>>"
 CONFIG_END="# <<< causet shell setup <<<"
+
+INSTALLED_PATHS=()
+
+cleanup_on_failure() {
+  local code=$?
+  if [[ "$code" -ne 0 && "${#INSTALLED_PATHS[@]}" -gt 0 ]]; then
+    echo "error: install failed; removing partial files" >&2
+    for path in "${INSTALLED_PATHS[@]}"; do
+      rm -f "$path"
+    done
+  fi
+  exit "$code"
+}
+trap cleanup_on_failure EXIT
 
 die() {
   echo "error: $*" >&2
@@ -33,7 +56,7 @@ detect_platform() {
   case "$raw_os" in
     Darwin) OS=darwin ;;
     Linux)  OS=linux ;;
-    *) die "unsupported OS: ${raw_os} (macOS and Linux only)" ;;
+    *) die "unsupported OS: ${raw_os} (macOS and Linux only; use WSL2 on Windows)" ;;
   esac
 
   case "$raw_arch" in
@@ -41,6 +64,31 @@ detect_platform() {
     arm64|aarch64)  ARCH=arm64 ;;
     *) die "unsupported CPU architecture: ${raw_arch}" ;;
   esac
+}
+
+resolve_cli_asset() {
+  echo "causet-${OS}-${ARCH}"
+}
+
+resolve_compiler_candidates() {
+  local primary="causet-compiler-${OS}-${ARCH}"
+  echo "$primary"
+  if [[ "$OS" == linux && "$ARCH" == arm64 ]]; then
+    echo "causet-compiler-linux-amd64"
+  fi
+}
+
+has_amd64_emulation() {
+  if [[ "$OS" != linux || "$ARCH" != arm64 ]]; then
+    return 0
+  fi
+  if [[ -r /proc/sys/fs/binfmt_misc/qemu-x86_64 || -r /proc/sys/fs/binfmt_misc/X86_64 ]]; then
+    return 0
+  fi
+  if command -v qemu-x86_64 >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 download_url() {
@@ -56,9 +104,15 @@ try_fetch() {
   local url=$1
   local dest=$2
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$dest"
+    if ! curl -fsSL "$url" -o "$dest"; then
+      rm -f "$dest"
+      return 1
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$dest" "$url"
+    if ! wget -qO "$dest" "$url"; then
+      rm -f "$dest"
+      return 1
+    fi
   else
     die "curl or wget is required"
   fi
@@ -71,7 +125,10 @@ verify_checksum() {
 
   local checksums expected actual
   checksums="$(mktemp)"
-  try_fetch "$(download_url checksums.txt)" "$checksums"
+  if ! try_fetch "$(download_url checksums.txt)" "$checksums"; then
+    rm -f "$checksums"
+    die "could not download checksums.txt (release ${VERSION:-latest} may not exist)"
+  fi
   expected="$(awk -v f="$asset" '$2 == f { print $1; exit }' "$checksums")"
   rm -f "$checksums"
 
@@ -82,8 +139,7 @@ verify_checksum() {
   elif command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$file" | awk '{print $1}')"
   else
-    echo "warning: no sha256 tool found; skipping checksum verification" >&2
-    return 0
+    die "Checksum verification cannot run. Install shasum or sha256sum, or explicitly set CAUSET_VERIFY_CHECKSUMS=0 to continue without verification."
   fi
 
   [[ "$actual" == "$expected" ]] || die "checksum mismatch for ${asset}"
@@ -97,24 +153,36 @@ install_asset() {
   dest="${INSTALL_DIR}/${dest_name}"
   tmp="$(mktemp)"
   echo "Downloading ${asset}..."
-  try_fetch "$url" "$tmp"
+  if ! try_fetch "$url" "$tmp"; then
+    rm -f "$tmp"
+    if [[ -n "$VERSION" ]]; then
+      die "could not download ${asset} for release ${VERSION} (404 or network error)"
+    fi
+    die "could not download ${asset} from latest release (404 or network error)"
+  fi
   verify_checksum "$asset" "$tmp"
   mkdir -p "$INSTALL_DIR"
   mv "$tmp" "$dest"
   chmod +x "$dest" 2>/dev/null || true
+  INSTALLED_PATHS+=("$dest")
   echo "Installed ${dest}"
 }
 
-install_compiler_with_fallback() {
-  local candidates=()
-  local primary="causet-compiler-${OS}-${ARCH}"
-  candidates+=("$primary")
-  if [[ "$OS" == linux && "$ARCH" == arm64 ]]; then
-    candidates+=("causet-compiler-linux-amd64")
+install_compiler() {
+  if [[ "$SKIP_COMPILER" == "1" ]]; then
+    echo "Skipping compiler install (CAUSET_SKIP_COMPILER=1)"
+    echo "note: build, compile, and deploy commands that require causet-compiler will not work until a compiler is installed." >&2
+    return 0
   fi
 
   local asset url tmp dest
-  for asset in "${candidates[@]}"; do
+  while IFS= read -r asset; do
+    [[ -n "$asset" ]] || continue
+    if [[ "$asset" == "causet-compiler-linux-amd64" && "$OS" == linux && "$ARCH" == arm64 ]]; then
+      if ! has_amd64_emulation; then
+        die "Linux ARM64 has no native compiler artifact and amd64 emulation was not detected. Install qemu-user/binfmt, use macOS ARM64 or Linux AMD64, or re-run with CAUSET_SKIP_COMPILER=1."
+      fi
+    fi
     url="$(download_url "$asset")"
     tmp="$(mktemp)"
     if try_fetch "$url" "$tmp" 2>/dev/null; then
@@ -123,14 +191,22 @@ install_compiler_with_fallback() {
       mkdir -p "$INSTALL_DIR"
       mv "$tmp" "$dest"
       chmod +x "$dest" 2>/dev/null || true
+      INSTALLED_PATHS+=("$dest")
       echo "Installed ${dest} (from ${asset})"
-      if [[ "$asset" != "$primary" ]]; then
-        echo "note: ${primary} is not published yet; using ${asset}" >&2
+      if [[ "$asset" != "causet-compiler-${OS}-${ARCH}" ]]; then
+        echo "note: causet-compiler-${OS}-${ARCH} is not published; using ${asset}" >&2
+        if [[ "$OS" == linux && "$ARCH" == arm64 ]]; then
+          echo "note: running the amd64 compiler on Linux ARM64 requires amd64 emulation (qemu-user / binfmt)" >&2
+        fi
       fi
       return 0
     fi
     rm -f "$tmp"
-  done
+  done < <(resolve_compiler_candidates)
+
+  if [[ "$OS" == linux && "$ARCH" == arm64 ]]; then
+    die "Linux ARM64 compiler is not published. Install with CAUSET_SKIP_COMPILER=1 (CLI only), use macOS ARM64 or Linux AMD64, or ensure amd64 emulation is available for the linux-amd64 compiler fallback."
+  fi
   die "could not download compiler for ${OS}/${ARCH}"
 }
 
@@ -195,10 +271,13 @@ main() {
   require_cmd uname
   detect_platform
 
-  local cli_asset="causet-${OS}-${ARCH}"
+  local cli_asset
+  cli_asset="$(resolve_cli_asset)"
   install_asset "$cli_asset" "causet"
-  install_compiler_with_fallback
+  install_compiler
   setup_shell
+
+  trap - EXIT
 
   cat <<EOF
 
@@ -213,10 +292,17 @@ Shell PATH and tab completion were added to your shell config when supported
 Then run:
 
   causet version
-  causet-compiler about
-  causet <TAB>       # tab completion for subcommands and flags
+  causet doctor
+
+Wallet demo:
+
+  causet new wallets my-wallets
+  cd my-wallets
+  causet local up
+  npm run dev --prefix app
 
 Set CAUSET_SKIP_SHELL_SETUP=1 to skip profile updates.
+Set CAUSET_SKIP_COMPILER=1 to install only the CLI.
 EOF
 }
 
