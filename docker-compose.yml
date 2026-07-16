@@ -1,0 +1,534 @@
+version: "3.8"
+
+services:
+  # Redpanda (Kafka API-compatible, no Zookeeper)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.3
+    container_name: verdant-redpanda
+    command: redpanda start --smp 2 --memory 1G --overprovisioned --advertise-kafka-addr redpanda:9092
+    ports:
+      - "9092:9092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # PostgreSQL
+  postgres:
+    image: postgis/postgis:16-3.5-alpine
+    platform: linux/amd64  # PostGIS official image has no arm64; emulation on Apple Silicon
+    container_name: verdant-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      # Creates verdant DB on first boot
+      POSTGRES_DB: verdant
+      POSTGRES_USER: verdant
+      POSTGRES_PASSWORD: verdant
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # init scripts run in order; 02 creates projection_cursors in projections DB
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./infra/postgres/02-projections-schema.sql:/docker-entrypoint-initdb.d/02-projections-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verdant -d verdant"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # Redis (cache)
+  redis:
+    image: redis:7-alpine
+    container_name: verdant-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio
+    container_name: verdant-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    # Use MinIO's native readiness endpoint (minio image doesn't include mc)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # MinIO bucket initialization (runs once; retries on failure)
+  minio-init:
+    image: minio/mc
+    container_name: verdant-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/create-buckets.sh"]
+    volumes:
+      - ./infra/minio/create-buckets.sh:/scripts/create-buckets.sh:ro
+    restart: on-failure
+    networks:
+      - verdant-network
+
+  # Projection schema init (ensures projection_cursors + projection_dead_letter exist; postgres init scripts only run on fresh DB)
+  projection-schema-init:
+    image: postgres:16-alpine
+    container_name: verdant-projection-schema-init
+    environment:
+      PGPASSWORD: verdant
+    entrypoint: ["/bin/sh", "/scripts/init-projections-schema.sh"]
+    volumes:
+      - ./infra/postgres/init-projections-schema.sh:/scripts/init-projections-schema.sh:ro
+      - ./apps/causet-projection-worker/src/main/resources/schema/projection_cursors.sql:/schema/projection_cursors.sql:ro
+      - ./apps/causet-projection-worker/src/main/resources/schema/projection_dead_letter.sql:/schema/projection_dead_letter.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - verdant-network
+
+  # Database Migrations (runs once and exits)
+  verdant-migrations:
+    build:
+      context: .
+      dockerfile: apps/verdant-migrations/Dockerfile
+    container_name: verdant-migrations
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/verdant
+      POSTGRES_USER: verdant
+      POSTGRES_PASSWORD: verdant
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - verdant-network
+
+  # Runtime Service (PURE REACTIVE - NO JDBC/FLYWAY)
+  verdant-runtime-service:
+    build:
+      context: .
+      dockerfile: apps/verdant-runtime-service/Dockerfile
+    container_name: verdant-runtime-service
+    ports:
+      - "8080:8080"
+      - "9090:9090" # gRPC
+    environment:
+      GRPC_SERVER_PORT: 9090
+
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_CONSUMER_GROUP_ID: verdant-runtime-service
+      KAFKA_INTENTS_TOPIC: causet.intents.v1
+      KAFKA_PATCHES_TOPIC: causet.patches.v1
+      KAFKA_LEDGER_EVENTS_TOPIC: causet.ledger-events.v1
+
+      R2DBC_URL: r2dbc:postgresql://postgres:5432/verdant
+      POSTGRES_USER: verdant
+      POSTGRES_PASSWORD: verdant
+
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      SERVER_PORT: 8080
+
+      CAUSET_STORAGE_ADAPTER: s3
+      CAUSET_STORAGE_ENDPOINT: http://minio:9000
+      CAUSET_STORAGE_BUCKET: causet-platform-spec-artifacts
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+
+      # AI decisions + memory (set keys in repo-root .env — see .env.example)
+      CAUSET_OPENAI_API_KEY: ${CAUSET_OPENAI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CAUSET_SECRETS_MASTER_KEY: ${CAUSET_SECRETS_MASTER_KEY:-}
+      CAUSET_MEMORY_STORE: ${CAUSET_MEMORY_STORE:-postgres}
+      CAUSET_MEMORY_INGESTION_ENABLED: ${CAUSET_MEMORY_INGESTION_ENABLED:-true}
+
+      VERDANT_RULES_COMPILATION_ENABLED: "true"
+      VERDANT_RULES_COMPILATION_PRECOMPILE: "true"
+
+      # Disable runtime webhook consumer when causet-realtime handles delivery
+      WEBHOOK_DELIVERY_ENABLED: "false"
+
+      LOGGING_LEVEL_ROOT: INFO
+      LOGGING_LEVEL_COM_VERDANT: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_BOOT: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK: INFO
+      LOGGING_LEVEL_IO_NETTY: INFO
+      LOGGING_PATTERN_CONSOLE: "%d{ISO8601} [%thread] %-5level %logger{36} [dd.trace_id=%X{dd.trace_id} dd.span_id=%X{dd.span_id}] - %msg%n"
+
+    depends_on:
+      verdant-migrations:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # Realtime service — WebSocket + SSE fanout (Go)
+  causet-realtime:
+    build:
+      context: ./apps/causet-realtime-go
+      dockerfile: Dockerfile
+    # Fix "exec format error": set DOCKER_DEFAULT_PLATFORM=linux/arm64 on Apple Silicon / Graviton
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    container_name: causet-realtime
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: 8081
+      WS_PATH: /ws
+
+      NUM_SHARDS: 1
+      SHARD_ID: 0
+      REDIRECT_ON_WRONG_SHARD: "false"
+
+      API_KEY_HEADER: "X-Verdant-Key"
+      REDIS_URL: "redis://redis:6379/0"
+      AUTH_CACHE_TTL: "60s"
+      AUTH_NEG_CACHE_TTL: "10s"
+      SIGNATURE_REQUIRED: "false"
+
+      HELLO_TIMEOUT: "5s"
+      MAX_CONN_PER_KEY: 50
+      MAX_CONN_PER_IP: 20
+      MAX_SUBS: 25
+      MAX_INBOUND_MSG_BYTES: 65536
+      HANDSHAKE_RATE_PER_IP: 10
+      HANDSHAKE_RATE_BURST: 20
+      INBOUND_RATE_PER_CONN: 100
+      INBOUND_RATE_BURST: 200
+
+      SENDQ_SIZE: 256
+      DROP_NONCRITICAL: "true"
+      DROP_DISCONNECT_THRESHOLD: 1000
+
+      PING_INTERVAL: "20s"
+      WRITE_TIMEOUT: "5s"
+      READ_TIMEOUT: "30s"
+
+      KAFKA_BROKERS: "redpanda:9092"
+      KAFKA_GROUP_ID: "causet-realtime"
+      KAFKA_TOPICS: "causet.patches.v1"
+      KAFKA_OPTIONAL: "false"
+
+      WEBHOOK_ENABLED: "true"
+      WEBHOOK_CONSUMER_GROUP: "webhook-dispatcher-gateway"
+      WEBHOOK_BATCH_INTERVAL: "2s"
+      KAFKA_TOPIC_WEBHOOK_DELIVERY_EVENTS: "causet.webhook-delivery-events.v1"
+      CAUSET_SECRETS_MASTER_KEY: ${CAUSET_SECRETS_MASTER_KEY:-}
+
+      LEDGER_SERVICE_URL: "http://verdant-runtime-service:8080"
+
+      ENV: "production"
+
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      verdant-runtime-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8081/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # Web Console (causet-cloud-control-plane)
+  web:
+    build:
+      context: apps/causet-cloud-control-plane
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8085
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-Causet Cloud}
+    container_name: causet-cloud-control-plane
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+      NEXT_PUBLIC_API_URL: http://localhost:8085
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8085
+      BACKEND_API_URL: http://causet-saas-cloud:8085
+      QUERY_SERVICE_URL: http://causet-query-service:8082
+      USE_MOCK_RELEASES: ${USE_MOCK_RELEASES:-false}
+    depends_on:
+      causet-saas-cloud:
+        condition: service_healthy
+      causet-query-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # Projection Worker (Causet Projection)
+  causet-projection-worker:
+    build:
+      context: .
+      dockerfile: apps/causet-projection-worker/Dockerfile
+    container_name: causet-projection-worker
+    ports:
+      - "8083:8083"
+    environment:
+      SERVER_PORT: 8083
+
+      # gRPC client: use Docker service name for runtime (same as causet-saas-cloud)
+      GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
+      GRPC_RUNTIME_ENABLED: "true"
+
+      # Kafka consumer
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_CONSUMER_GROUP_ID: causet-projection-worker
+      KAFKA_TOPIC_PROJECTION_EVENTS: causet.projection-events.v1
+      KAFKA_TOPIC_DLQ: causet.projection-dlq.v1
+
+      # Projections database
+      PROJECTION_DB_URL: r2dbc:postgresql://postgres:5432/projections
+      PROJECTION_DB_USERNAME: verdant
+      PROJECTION_DB_PASSWORD: verdant
+
+      CAUSET_STORAGE_ADAPTER: s3
+      CAUSET_STORAGE_ENDPOINT: http://minio:9000
+      CAUSET_STORAGE_BUCKET: causet-platform-spec-artifacts
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+
+      LOGGING_LEVEL_COM_CAUSET: INFO
+
+    depends_on:
+      projection-schema-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      verdant-runtime-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+  # Query Service (Causet Query)
+  causet-query-service:
+    build:
+      context: .
+      dockerfile: apps/causet-query-service/Dockerfile
+    container_name: causet-query-service
+    ports:
+      - "8082:8082"
+    environment:
+      SERVER_PORT: 8082
+
+      # Control plane for GetActiveRelease
+      CONTROL_PLANE_BASE_URL: http://causet-saas-cloud:8085
+
+      # CU metering: report query CU via Kafka (causet.query-telemetry.v1) -> causet-saas-cloud -> runtime
+      CU_REPORTING_ENABLED: "true"
+
+      # Projections database
+      PROJECTION_DB_URL: r2dbc:postgresql://postgres:5432/projections
+      PROJECTION_DB_USERNAME: verdant
+      PROJECTION_DB_PASSWORD: verdant
+
+      CAUSET_STORAGE_ADAPTER: s3
+      CAUSET_STORAGE_ENDPOINT: http://minio:9000
+      CAUSET_STORAGE_BUCKET: causet-platform-spec-artifacts
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+
+      # Optional: stub for local dev without control plane
+      # QUERY_STUB_IR_VERSION: sha256:default
+
+      # Redis response cache (disable if Redis/QueryCacheFacade fails to init)
+      QUERY_CACHE_REDIS_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+
+      LOGGING_LEVEL_COM_CAUSET: INFO
+
+      # Kafka — projection lifecycle events (cache invalidation)
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_TOPIC_PROJECTION_EVENTS: causet.projection-events.v1
+      KAFKA_QUERY_LIFECYCLE_GROUP: causet-query-projection-lifecycle
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8082/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+
+  # Control Plane (Causet SaaS Cloud)
+  causet-saas-cloud:
+    build:
+      context: .
+      dockerfile: apps/causet-saas-cloud/Dockerfile
+    container_name: causet-saas-cloud
+    ports:
+      - "8085:8085"
+    environment:
+      SERVER_PORT: 8085
+
+      # gRPC client: use Docker service name for runtime (not localhost)
+      GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
+      GRPC_RUNTIME_ENABLED: "true"
+
+      R2DBC_URL: r2dbc:postgresql://postgres:5432/verdant_control_plane
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/verdant_control_plane
+      PROJECTION_DB_URL: r2dbc:postgresql://postgres:5432/projections
+      POSTGRES_USER: verdant
+      POSTGRES_PASSWORD: verdant
+
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_AUTH_EVENTS_TOPIC: causet.auth-events.v1
+
+      JWT_SECRET: causet-dev-secret
+      JWT_TTL: 60
+      ENVIRONMENT: production
+
+      # Auth key: mount from repo for local dev; in ECS use AUTH_SIGNING_KEY from Secrets Manager
+      AUTH_SIGNING_KEY_PATH: /app/auth-signing-key.pem
+
+      # Local host: anonymous OK; Bearer JWTs still validated + membership enforced
+      SECURITY_LOCAL_OPEN: "true"
+      SECURITY_DEV_SKIP_PLATFORMS: "true"
+
+      CAUSET_STORAGE_ADAPTER: s3
+      CAUSET_STORAGE_ENDPOINT: http://minio:9000
+      CAUSET_STORAGE_BUCKET: causet-platform-spec-artifacts
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+
+      # BYOK + fork secret gRPC push to runtime (must match runtime CAUSET_SECRETS_MASTER_KEY)
+      CAUSET_SECRETS_MASTER_KEY: ${CAUSET_SECRETS_MASTER_KEY:-}
+
+      # Query proxy: forward projection queries to causet-query-service
+      QUERY_SERVICE_URL: http://causet-query-service:8082
+    volumes:
+      - ./apps/causet-saas-cloud/src/main/resources/auth-signing-key.pem:/app/auth-signing-key.pem:ro
+    depends_on:
+      verdant-runtime-service:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      causet-query-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8085/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - verdant-network
+
+volumes:
+  redpanda-data:
+  postgres-data:
+  redis-data:
+  minio-data:
+
+networks:
+  verdant-network:
+    driver: bridge
