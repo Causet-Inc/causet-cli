@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 1,
+  "updated": "2026-07-16",
+  "cliVersion": "v10.0.12",
+  "cliReleaseUrl": "https://github.com/Causet-Inc/causet-cli/releases/tag/v10.0.12",
+  "installerUrl": "https://install.causet.io/install.sh",
+  "goldenPath": {
+    "title": "Install and run the wallet demo",
+    "steps": [
+      {
+        "id": "prerequisites",
+        "commands": [
+          "docker --version",
+          "docker compose version",
+          "node --version"
+        ]
+      },
+      {
+        "id": "install-cli",
+        "commands": [
+          "curl -fsSL https://install.causet.io/install.sh | bash"
+        ]
+      },
+      {
+        "id": "verify-version",
+        "commands": [
+          "causet version"
+        ]
+      },
+      {
+        "id": "preflight",
+        "commands": [
+          "causet doctor"
+        ]
+      },
+      {
+        "id": "create-wallets-demo",
+        "commands": [
+          "causet context use env local",
+          "causet new wallets my-wallets"
+        ],
+        "notes": "Demos require local CLI context. causet new may prompt to start the Docker stack when interactive and the stack is down."
+      },
+      {
+        "id": "start-runtime-if-needed",
+        "commands": [
+          "cd my-wallets",
+          "causet local up"
+        ],
+        "notes": "Skip when causet new already started the local runtime."
+      },
+      {
+        "id": "start-ui",
+        "commands": [
+          "npm run dev --prefix app"
+        ],
+        "notes": "Open http://localhost:3850 manually. The CLI does not open a browser."
+      },
+      {
+        "id": "submit-transaction",
+        "commands": [
+          "causet intent OPEN_WALLET --stream wallet_stream --entity wallet-alice --fork sandbox --payload '{\"wallet_id\":\"wallet-alice\",\"owner\":\"alice\",\"currency\":\"USD\"}'"
+        ]
+      },
+      {
+        "id": "inspect",
+        "commands": [
+          "causet inspect state --entity wallet-alice --stream wallet_stream --fork sandbox",
+          "causet inspect timeline --entity wallet-alice --stream wallet_stream --fork sandbox --all"
+        ]
+      },
+      {
+        "id": "stop-runtime",
+        "commands": [
+          "causet local down"
+        ]
+      },
+      {
+        "id": "reset-local-data",
+        "commands": [
+          "causet local reset --yes"
+        ]
+      }
+    ]
+  },
+  "causetNewWallets": {
+    "command": "causet new wallets my-wallets",
+    "requiresLocalContext": true,
+    "requiresDockerForDefaultPath": true,
+    "createsProjectDirectory": true,
+    "copiesTemplateFiles": true,
+    "runsNpmInstall": true,
+    "npmInstallCommand": "npm install --prefix app",
+    "skipWithFlag": "--no-install",
+    "createsLocalPlatformAndApplication": true,
+    "writesProjectConfig": true,
+    "projectConfigPath": ".causet/causet.yaml",
+    "updatesGlobalConfig": true,
+    "globalConfigPath": "~/.causet/config.json",
+    "compilesDsl": true,
+    "deploysToFork": "sandbox",
+    "startsDockerAutomatically": "interactive-prompt-only",
+    "startsFrontend": false,
+    "opensBrowser": false,
+    "nextStepsAfterSuccess": [
+      "cd my-wallets",
+      "npm run dev --prefix app"
+    ]
+  },
+  "platformMatrix": [
+    {
+      "platform": "macOS ARM64",
+      "cli": "native",
+      "compiler": "native",
+      "localRuntime": "supported",
+      "notes": "Apple Silicon"
+    },
+    {
+      "platform": "macOS AMD64",
+      "cli": "native",
+      "compiler": "native",
+      "localRuntime": "supported",
+      "notes": "Intel Mac"
+    },
+    {
+      "platform": "Linux AMD64",
+      "cli": "native",
+      "compiler": "native",
+      "localRuntime": "supported",
+      "notes": "Primary Linux target"
+    },
+    {
+      "platform": "Linux ARM64",
+      "cli": "native",
+      "compiler": "linux-amd64-with-emulation-or-skip",
+      "localRuntime": "docker-emulation",
+      "notes": "No causet-compiler-linux-arm64 artifact. Installer requires amd64 emulation (qemu/binfmt) for compiler fallback or CAUSET_SKIP_COMPILER=1."
+    },
+    {
+      "platform": "Windows",
+      "cli": "not-native",
+      "compiler": "not-native",
+      "localRuntime": "wsl2-only",
+      "notes": "Use WSL2 with a supported Linux environment"
+    }
+  ],
+  "services": [
+    {
+      "label": "Wallets demo UI",
+      "url": "http://localhost:3850",
+      "health": null
+    },
+    {
+      "label": "Local management API",
+      "url": "http://localhost:8085",
+      "health": "/actuator/health",
+      "composeService": "causet-saas-cloud"
+    },
+    {
+      "label": "Runtime API",
+      "url": "http://localhost:8080",
+      "health": "/actuator/health",
+      "composeService": "causet-runtime-service"
+    },
+    {
+      "label": "Realtime service",
+      "url": "http://localhost:8081",
+      "health": "/healthz",
+      "composeService": "causet-realtime"
+    },
+    {
+      "label": "Query service",
+      "url": "http://localhost:8082",
+      "health": "/actuator/health",
+      "composeService": "causet-query-service"
+    },
+    {
+      "label": "Projection service",
+      "url": "http://localhost:8083",
+      "health": "/actuator/health",
+      "composeService": "causet-projection-worker"
+    },
+    {
+      "label": "MinIO console",
+      "url": "http://localhost:9001",
+      "health": null,
+      "composeService": "minio"
+    },
+    {
+      "label": "Redpanda broker",
+      "url": "localhost:9092",
+      "health": null,
+      "composeService": "redpanda"
+    }
+  ],
+  "sdk": {
+    "npmLatestVerified": "0.2.0",
+    "githubRelease": "v0.2.0",
+    "license": "MIT",
+    "maturity": "Supported preview",
+    "productionUse": "Supported for pilots"
+  }
+}
