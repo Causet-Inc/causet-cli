@@ -1,5 +1,20 @@
 version: "3.8"
 
+# Platform development (repo root compose): sandbox-like auth by default — Clerk JWT +
+# platform membership enforced. Override in .env.local only when needed.
+# For local-open / CLI app building, use packaging/local-core/docker-compose.yml instead.
+
+# Datadog APM/statsd off by default locally (no agent). Set DD_TRACE_ENABLED=true in .env.local to opt in.
+x-datadog-off: &datadog-off
+  DD_TRACE_ENABLED: ${DD_TRACE_ENABLED:-false}
+  DD_PROFILING_ENABLED: ${DD_PROFILING_ENABLED:-false}
+  DD_LOGS_INJECTION: ${DD_LOGS_INJECTION:-false}
+  DD_RUNTIME_METRICS_ENABLED: ${DD_RUNTIME_METRICS_ENABLED:-false}
+  DD_INSTRUMENTATION_TELEMETRY_ENABLED: ${DD_INSTRUMENTATION_TELEMETRY_ENABLED:-false}
+  DD_JMXFETCH_ENABLED: "false"
+  LOG_PATTERN_CONSOLE: ${LOG_PATTERN_CONSOLE:-%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n}
+  LOGGING_PATTERN_CONSOLE: ${LOGGING_PATTERN_CONSOLE:-%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n}
+
 services:
   # Redpanda (Kafka API-compatible, no Zookeeper)
   redpanda:
@@ -100,7 +115,7 @@ services:
     networks:
       - verdant-network
 
-  # Projection schema init (ensures projection_cursors + projection_dead_letter exist; postgres init scripts only run on fresh DB)
+  # Projection schema init (ensures required DBs + projection tables exist; postgres init scripts only run on fresh DB)
   projection-schema-init:
     image: postgres:16-alpine
     container_name: verdant-projection-schema-init
@@ -131,6 +146,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      projection-schema-init:
+        condition: service_completed_successfully
     restart: "no"
     networks:
       - verdant-network
@@ -145,6 +162,7 @@ services:
       - "8080:8080"
       - "9090:9090" # gRPC
     environment:
+      <<: *datadog-off
       GRPC_SERVER_PORT: 9090
 
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
@@ -186,13 +204,17 @@ services:
       # Disable runtime webhook consumer when causet-realtime handles delivery
       WEBHOOK_DELIVERY_ENABLED: "false"
 
+      # sync = wait for ledger commit; async = Kafka publish + 202 (default)
+      RUNTIME_INTENT_DEFAULT_MODE: ${RUNTIME_INTENT_DEFAULT_MODE:-async}
+      # SIDE_EFFECTS (AI) after core commit — sync clients are not blocked
+      RUNTIME_SIDE_EFFECTS_POST_COMMIT: ${RUNTIME_SIDE_EFFECTS_POST_COMMIT:-true}
+
       LOGGING_LEVEL_ROOT: INFO
       LOGGING_LEVEL_COM_VERDANT: INFO
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_BOOT: INFO
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: INFO
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK: INFO
       LOGGING_LEVEL_IO_NETTY: INFO
-      LOGGING_PATTERN_CONSOLE: "%d{ISO8601} [%thread] %-5level %logger{36} [dd.trace_id=%X{dd.trace_id} dd.span_id=%X{dd.span_id}] - %msg%n"
 
     depends_on:
       verdant-migrations:
@@ -228,6 +250,7 @@ services:
     ports:
       - "8081:8081"
     environment:
+      <<: *datadog-off
       PORT: 8081
       WS_PATH: /ws
 
@@ -271,8 +294,12 @@ services:
       CAUSET_SECRETS_MASTER_KEY: ${CAUSET_SECRETS_MASTER_KEY:-}
 
       LEDGER_SERVICE_URL: "http://verdant-runtime-service:8080"
+      JWKS_URL: "http://causet-saas-cloud:8085/.well-known/jwks.json"
+      SAAS_API_URL: "http://causet-saas-cloud:8085"
+      AUTH_LOCAL_OPEN: ${AUTH_LOCAL_OPEN:-false}
+      SECURITY_LOCAL_OPEN: ${SECURITY_LOCAL_OPEN:-false}
 
-      ENV: "production"
+      ENV: ${ENVIRONMENT:-sandbox}
 
     depends_on:
       redpanda:
@@ -304,6 +331,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      <<: *datadog-off
       NODE_ENV: production
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
@@ -336,6 +364,7 @@ services:
     ports:
       - "8083:8083"
     environment:
+      <<: *datadog-off
       SERVER_PORT: 8083
 
       # gRPC client: use Docker service name for runtime (same as causet-saas-cloud)
@@ -392,12 +421,18 @@ services:
     ports:
       - "8082:8082"
     environment:
+      <<: *datadog-off
       SERVER_PORT: 8082
 
       # Control plane for GetActiveRelease
       CONTROL_PLANE_BASE_URL: http://causet-saas-cloud:8085
 
+      # gRPC client: Docker DNS name for runtime (NOT localhost — that is this container)
+      GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
+      GRPC_RUNTIME_ENABLED: "true"
+
       # CU metering: report query CU via Kafka (causet.query-telemetry.v1) -> causet-saas-cloud -> runtime
+      # Also dual-writes via gRPC ReportQueryCu / RuntimeLogsIngest when application_id is a UUID.
       CU_REPORTING_ENABLED: "true"
 
       # Projections database
@@ -435,6 +470,8 @@ services:
         condition: service_healthy
       redpanda:
         condition: service_healthy
+      verdant-runtime-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8082/actuator/health || exit 1"]
       interval: 30s
@@ -455,6 +492,7 @@ services:
     ports:
       - "8085:8085"
     environment:
+      <<: *datadog-off
       SERVER_PORT: 8085
 
       # gRPC client: use Docker service name for runtime (not localhost)
@@ -477,14 +515,21 @@ services:
 
       JWT_SECRET: causet-dev-secret
       JWT_TTL: 60
-      ENVIRONMENT: production
+      ENVIRONMENT: ${ENVIRONMENT:-sandbox}
 
       # Auth key: mount from repo for local dev; in ECS use AUTH_SIGNING_KEY from Secrets Manager
       AUTH_SIGNING_KEY_PATH: /app/auth-signing-key.pem
 
-      # Local host: anonymous OK; Bearer JWTs still validated + membership enforced
-      SECURITY_LOCAL_OPEN: "true"
-      SECURITY_DEV_SKIP_PLATFORMS: "true"
+      # Sandbox-like local dev: Clerk JWT + membership enforced (see .env.local.example).
+      # Set SECURITY_LOCAL_OPEN=true only for wide-open CLI/app-on-Causet workflows.
+      SECURITY_LOCAL_OPEN: ${SECURITY_LOCAL_OPEN:-false}
+      SECURITY_DEV_SKIP_PLATFORMS: ${SECURITY_DEV_SKIP_PLATFORMS:-false}
+      SECURITY_REQUIRE_ORG: ${SECURITY_REQUIRE_ORG:-false}
+      CLERK_DOMAIN: ${CLERK_DOMAIN:-}
+      CLERK_JWKS_URL: ${CLERK_JWKS_URL:-}
+      CLERK_ISSUER: ${CLERK_ISSUER:-}
+      CLERK_API_SECRET_KEY: ${CLERK_API_SECRET_KEY:-${CLERK_SECRET_KEY:-}}
+      CONTROL_PLANE_BASE_URL: ${CONTROL_PLANE_BASE_URL:-http://localhost:3000}
 
       CAUSET_STORAGE_ADAPTER: s3
       CAUSET_STORAGE_ENDPOINT: http://minio:9000
@@ -496,8 +541,21 @@ services:
       # BYOK + fork secret gRPC push to runtime (must match runtime CAUSET_SECRETS_MASTER_KEY)
       CAUSET_SECRETS_MASTER_KEY: ${CAUSET_SECRETS_MASTER_KEY:-}
 
+      # GitHub App (repo link / DSL sync) — set in .env.local
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+
       # Query proxy: forward projection queries to causet-query-service
       QUERY_SERVICE_URL: http://causet-query-service:8082
+
+      LOG_LEVEL_ROOT: ${LOG_LEVEL_ROOT:-INFO}
+      LOG_LEVEL_CAUSET: ${LOG_LEVEL_CAUSET:-INFO}
+      LOG_LEVEL_METRICS: ${LOG_LEVEL_METRICS:-WARN}
+      LOG_LEVEL_SAAS_GRPC: ${LOG_LEVEL_SAAS_GRPC:-WARN}
+      LOG_LEVEL_SAAS_PROXY: ${LOG_LEVEL_SAAS_PROXY:-WARN}
+      LOG_LEVEL_SAAS_CACHE: ${LOG_LEVEL_SAAS_CACHE:-WARN}
+      LOGGING_LEVEL_COM_CAUSET: ${LOG_LEVEL_CAUSET:-INFO}
     volumes:
       - ./apps/causet-saas-cloud/src/main/resources/auth-signing-key.pem:/app/auth-signing-key.pem:ro
     depends_on:
