@@ -431,8 +431,8 @@ services:
       GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
       GRPC_RUNTIME_ENABLED: "true"
 
-      # CU metering: report query CU via Kafka (causet.query-telemetry.v1) -> causet-saas-cloud -> runtime
-      # Also dual-writes via gRPC ReportQueryCu / RuntimeLogsIngest when application_id is a UUID.
+      # CU metering: gRPC ReportQueryCu when application_id is UUID; else Kafka -> saas-cloud -> runtime.
+      # (Never both — dual-write doubled CU_METERING logs and application_cu_usage.)
       CU_REPORTING_ENABLED: "true"
 
       # Projections database
