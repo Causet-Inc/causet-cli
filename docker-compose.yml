@@ -201,8 +201,9 @@ services:
       VERDANT_RULES_COMPILATION_ENABLED: "true"
       VERDANT_RULES_COMPILATION_PRECOMPILE: "true"
 
-      # Disable runtime webhook consumer when causet-realtime handles delivery
+      # Disable legacy webhook-events producer + in-runtime webhook consumer
       WEBHOOK_DELIVERY_ENABLED: "false"
+      WEBHOOK_EVENTS_ENABLED: "false"
 
       # sync = wait for ledger commit; async = Kafka publish + 202 (default)
       RUNTIME_INTENT_DEFAULT_MODE: ${RUNTIME_INTENT_DEFAULT_MODE:-async}
@@ -287,7 +288,7 @@ services:
       KAFKA_TOPICS: "causet.patches.v1"
       KAFKA_OPTIONAL: "false"
 
-      WEBHOOK_ENABLED: "true"
+      WEBHOOK_ENABLED: "false"
       WEBHOOK_CONSUMER_GROUP: "webhook-dispatcher-gateway"
       WEBHOOK_BATCH_INTERVAL: "2s"
       KAFKA_TOPIC_WEBHOOK_DELIVERY_EVENTS: "causet.webhook-delivery-events.v1"
@@ -299,12 +300,21 @@ services:
       AUTH_LOCAL_OPEN: ${AUTH_LOCAL_OPEN:-false}
       SECURITY_LOCAL_OPEN: ${SECURITY_LOCAL_OPEN:-false}
 
+      # Durable outbound destinations (Kafka + webhook + websocket adapters)
+      OUTBOUND_ENABLED: "true"
+      OUTBOUND_DATABASE_URL: "postgres://verdant:verdant@postgres:5432/causet_realtime?sslmode=disable"
+      OUTBOUND_FANOUT_ON_COMMITTED: "false"
+      OUTBOUND_CONSUMER_GROUP: "causet-outbound-export"
+      OUTBOUND_TOPICS: "causet.committed-events.v1,causet.patches.v1"
+
       ENV: ${ENVIRONMENT:-sandbox}
 
     depends_on:
       redpanda:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       verdant-runtime-service:
         condition: service_healthy
@@ -560,6 +570,9 @@ services:
 
       # Query proxy: forward projection queries to causet-query-service
       QUERY_SERVICE_URL: http://causet-query-service:8082
+
+      # Destination connection tests / test events (data plane)
+      REALTIME_SERVICE_URL: http://causet-realtime:8081
 
       LOG_LEVEL_ROOT: ${LOG_LEVEL_ROOT:-INFO}
       LOG_LEVEL_CAUSET: ${LOG_LEVEL_CAUSET:-INFO}
