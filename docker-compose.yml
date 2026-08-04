@@ -19,7 +19,7 @@ services:
   # Redpanda (Kafka API-compatible, no Zookeeper)
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.3
-    container_name: verdant-redpanda
+    container_name: causet-redpanda
     command: redpanda start --smp 2 --memory 1G --overprovisioned --advertise-kafka-addr redpanda:9092
     ports:
       - "9092:9092"
@@ -33,38 +33,38 @@ services:
       start_period: 15s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # PostgreSQL
   postgres:
     image: postgis/postgis:16-3.5-alpine
     platform: linux/amd64  # PostGIS official image has no arm64; emulation on Apple Silicon
-    container_name: verdant-postgres
+    container_name: causet-postgres
     ports:
       - "5432:5432"
     environment:
-      # Creates verdant DB on first boot
-      POSTGRES_DB: verdant
-      POSTGRES_USER: verdant
-      POSTGRES_PASSWORD: verdant
+      # Creates causet DB on first boot
+      POSTGRES_DB: causet
+      POSTGRES_USER: causet
+      POSTGRES_PASSWORD: causet
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # init scripts run in order; 02 creates projection_cursors in projections DB
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
       - ./infra/postgres/02-projections-schema.sql:/docker-entrypoint-initdb.d/02-projections-schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U verdant -d verdant"]
+      test: ["CMD-SHELL", "pg_isready -U causet -d causet"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # Redis (cache)
   redis:
     image: redis:7-alpine
-    container_name: verdant-redis
+    container_name: causet-redis
     ports:
       - "6379:6379"
     volumes:
@@ -76,12 +76,12 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # MinIO (S3-compatible storage)
   minio:
     image: minio/minio
-    container_name: verdant-minio
+    container_name: causet-minio
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -99,12 +99,12 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # MinIO bucket initialization (runs once; retries on failure)
   minio-init:
     image: minio/mc
-    container_name: verdant-minio-init
+    container_name: causet-minio-init
     depends_on:
       minio:
         condition: service_healthy
@@ -113,14 +113,14 @@ services:
       - ./infra/minio/create-buckets.sh:/scripts/create-buckets.sh:ro
     restart: on-failure
     networks:
-      - verdant-network
+      - causet-network
 
   # Projection schema init (ensures required DBs + projection tables exist; postgres init scripts only run on fresh DB)
   projection-schema-init:
     image: postgres:16-alpine
-    container_name: verdant-projection-schema-init
+    container_name: causet-projection-schema-init
     environment:
-      PGPASSWORD: verdant
+      PGPASSWORD: causet
     entrypoint: ["/bin/sh", "/scripts/init-projections-schema.sh"]
     volumes:
       - ./infra/postgres/init-projections-schema.sh:/scripts/init-projections-schema.sh:ro
@@ -131,18 +131,18 @@ services:
         condition: service_healthy
     restart: "no"
     networks:
-      - verdant-network
+      - causet-network
 
   # Database Migrations (runs once and exits)
-  verdant-migrations:
+  causet-migrations:
     build:
       context: .
-      dockerfile: apps/verdant-migrations/Dockerfile
-    container_name: verdant-migrations
+      dockerfile: apps/causet-migrations/Dockerfile
+    container_name: causet-migrations
     environment:
-      FLYWAY_URL: jdbc:postgresql://postgres:5432/verdant
-      POSTGRES_USER: verdant
-      POSTGRES_PASSWORD: verdant
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/causet
+      POSTGRES_USER: causet
+      POSTGRES_PASSWORD: causet
     depends_on:
       postgres:
         condition: service_healthy
@@ -150,14 +150,14 @@ services:
         condition: service_completed_successfully
     restart: "no"
     networks:
-      - verdant-network
+      - causet-network
 
   # Runtime Service (PURE REACTIVE - NO JDBC/FLYWAY)
-  verdant-runtime-service:
+  causet-runtime-service:
     build:
       context: .
-      dockerfile: apps/verdant-runtime-service/Dockerfile
-    container_name: verdant-runtime-service
+      dockerfile: apps/causet-runtime-service/Dockerfile
+    container_name: causet-runtime-service
     ports:
       - "8080:8080"
       - "9090:9090" # gRPC
@@ -166,14 +166,14 @@ services:
       GRPC_SERVER_PORT: 9090
 
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
-      KAFKA_CONSUMER_GROUP_ID: verdant-runtime-service
+      KAFKA_CONSUMER_GROUP_ID: causet-runtime-service
       KAFKA_INTENTS_TOPIC: causet.intents.v1
       KAFKA_PATCHES_TOPIC: causet.patches.v1
       KAFKA_LEDGER_EVENTS_TOPIC: causet.ledger-events.v1
 
-      R2DBC_URL: r2dbc:postgresql://postgres:5432/verdant
-      POSTGRES_USER: verdant
-      POSTGRES_PASSWORD: verdant
+      R2DBC_URL: r2dbc:postgresql://postgres:5432/causet
+      POSTGRES_USER: causet
+      POSTGRES_PASSWORD: causet
 
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
@@ -198,8 +198,8 @@ services:
       CAUSET_MEMORY_STORE: ${CAUSET_MEMORY_STORE:-postgres}
       CAUSET_MEMORY_INGESTION_ENABLED: ${CAUSET_MEMORY_INGESTION_ENABLED:-true}
 
-      VERDANT_RULES_COMPILATION_ENABLED: "true"
-      VERDANT_RULES_COMPILATION_PRECOMPILE: "true"
+      CAUSET_RULES_COMPILATION_ENABLED: "true"
+      CAUSET_RULES_COMPILATION_PRECOMPILE: "true"
 
       # Disable legacy webhook-events producer + in-runtime webhook consumer
       WEBHOOK_DELIVERY_ENABLED: "false"
@@ -218,7 +218,7 @@ services:
       LOGGING_LEVEL_IO_NETTY: INFO
 
     depends_on:
-      verdant-migrations:
+      causet-migrations:
         condition: service_completed_successfully
       redpanda:
         condition: service_healthy
@@ -238,7 +238,7 @@ services:
       start_period: 120s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # Realtime service — WebSocket + SSE fanout (Go)
   causet-realtime:
@@ -294,7 +294,7 @@ services:
       KAFKA_TOPIC_WEBHOOK_DELIVERY_EVENTS: "causet.webhook-delivery-events.v1"
       CAUSET_SECRETS_MASTER_KEY: ${CAUSET_SECRETS_MASTER_KEY:-}
 
-      LEDGER_SERVICE_URL: "http://verdant-runtime-service:8080"
+      LEDGER_SERVICE_URL: "http://causet-runtime-service:8080"
       JWKS_URL: "http://causet-saas-cloud:8085/.well-known/jwks.json"
       SAAS_API_URL: "http://causet-saas-cloud:8085"
       AUTH_LOCAL_OPEN: ${AUTH_LOCAL_OPEN:-false}
@@ -302,7 +302,7 @@ services:
 
       # Durable outbound destinations (Kafka + webhook + websocket adapters)
       OUTBOUND_ENABLED: "true"
-      OUTBOUND_DATABASE_URL: "postgres://verdant:verdant@postgres:5432/causet_realtime?sslmode=disable"
+      OUTBOUND_DATABASE_URL: "postgres://causet:causet@postgres:5432/causet_realtime?sslmode=disable"
       OUTBOUND_FANOUT_ON_COMMITTED: "false"
       OUTBOUND_CONSUMER_GROUP: "causet-outbound-export"
       OUTBOUND_TOPICS: "causet.committed-events.v1,causet.patches.v1"
@@ -316,7 +316,7 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      verdant-runtime-service:
+      causet-runtime-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8081/healthz || exit 1"]
@@ -326,7 +326,7 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # Web Console (causet-cloud-control-plane)
   web:
@@ -363,7 +363,7 @@ services:
       start_period: 40s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # Projection Worker (Causet Projection)
   causet-projection-worker:
@@ -378,7 +378,7 @@ services:
       SERVER_PORT: 8083
 
       # gRPC client: use Docker service name for runtime (same as causet-saas-cloud)
-      GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
+      GRPC_RUNTIME_ADDRESS: static://causet-runtime-service:9090
       GRPC_RUNTIME_ENABLED: "true"
 
       # Kafka consumer
@@ -389,8 +389,8 @@ services:
 
       # Projections database
       PROJECTION_DB_URL: r2dbc:postgresql://postgres:5432/projections
-      PROJECTION_DB_USERNAME: verdant
-      PROJECTION_DB_PASSWORD: verdant
+      PROJECTION_DB_USERNAME: causet
+      PROJECTION_DB_PASSWORD: causet
 
       CAUSET_STORAGE_ADAPTER: s3
       CAUSET_STORAGE_ENDPOINT: http://minio:9000
@@ -410,7 +410,7 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      verdant-runtime-service:
+      causet-runtime-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8083/actuator/health || exit 1"]
@@ -420,7 +420,7 @@ services:
       start_period: 90s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
   # Query Service (Causet Query)
   causet-query-service:
@@ -438,7 +438,7 @@ services:
       CONTROL_PLANE_BASE_URL: http://causet-saas-cloud:8085
 
       # gRPC client: Docker DNS name for runtime (NOT localhost — that is this container)
-      GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
+      GRPC_RUNTIME_ADDRESS: static://causet-runtime-service:9090
       GRPC_RUNTIME_ENABLED: "true"
 
       # CU metering: gRPC ReportQueryCu when application_id is UUID; else Kafka -> saas-cloud -> runtime.
@@ -447,8 +447,8 @@ services:
 
       # Projections database
       PROJECTION_DB_URL: r2dbc:postgresql://postgres:5432/projections
-      PROJECTION_DB_USERNAME: verdant
-      PROJECTION_DB_PASSWORD: verdant
+      PROJECTION_DB_USERNAME: causet
+      PROJECTION_DB_PASSWORD: causet
 
       CAUSET_STORAGE_ADAPTER: s3
       CAUSET_STORAGE_ENDPOINT: http://minio:9000
@@ -480,7 +480,7 @@ services:
         condition: service_healthy
       redpanda:
         condition: service_healthy
-      verdant-runtime-service:
+      causet-runtime-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8082/actuator/health || exit 1"]
@@ -490,7 +490,7 @@ services:
       start_period: 90s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
 
   # Control Plane (Causet SaaS Cloud)
@@ -506,14 +506,14 @@ services:
       SERVER_PORT: 8085
 
       # gRPC client: use Docker service name for runtime (not localhost)
-      GRPC_RUNTIME_ADDRESS: static://verdant-runtime-service:9090
+      GRPC_RUNTIME_ADDRESS: static://causet-runtime-service:9090
       GRPC_RUNTIME_ENABLED: "true"
 
-      R2DBC_URL: r2dbc:postgresql://postgres:5432/verdant_control_plane
-      FLYWAY_URL: jdbc:postgresql://postgres:5432/verdant_control_plane
+      R2DBC_URL: r2dbc:postgresql://postgres:5432/causet_control_plane
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/causet_control_plane
       PROJECTION_DB_URL: r2dbc:postgresql://postgres:5432/projections
-      POSTGRES_USER: verdant
-      POSTGRES_PASSWORD: verdant
+      POSTGRES_USER: causet
+      POSTGRES_PASSWORD: causet
 
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
@@ -584,7 +584,7 @@ services:
     volumes:
       - ./apps/causet-saas-cloud/src/main/resources/auth-signing-key.pem:/app/auth-signing-key.pem:ro
     depends_on:
-      verdant-runtime-service:
+      causet-runtime-service:
         condition: service_healthy
       redpanda:
         condition: service_healthy
@@ -604,7 +604,7 @@ services:
       start_period: 60s
     restart: unless-stopped
     networks:
-      - verdant-network
+      - causet-network
 
 volumes:
   redpanda-data:
@@ -613,5 +613,5 @@ volumes:
   minio-data:
 
 networks:
-  verdant-network:
+  causet-network:
     driver: bridge
