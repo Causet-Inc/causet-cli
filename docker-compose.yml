@@ -2,7 +2,7 @@ version: "3.8"
 
 # Platform development (repo root compose): sandbox-like auth by default — Clerk JWT +
 # platform membership enforced. Override in .env.local only when needed.
-# For local-open / CLI app building, use packaging/local-core/docker-compose.yml instead.
+# For local CLI app building, use packaging/local-core/docker-compose.yml instead.
 
 # Datadog APM/statsd off by default locally (no agent). Set DD_TRACE_ENABLED=true in .env.local to opt in.
 x-datadog-off: &datadog-off
@@ -297,8 +297,6 @@ services:
       LEDGER_SERVICE_URL: "http://causet-runtime-service:8080"
       JWKS_URL: "http://causet-saas-cloud:8085/.well-known/jwks.json"
       SAAS_API_URL: "http://causet-saas-cloud:8085"
-      AUTH_LOCAL_OPEN: ${AUTH_LOCAL_OPEN:-false}
-      SECURITY_LOCAL_OPEN: ${SECURITY_LOCAL_OPEN:-false}
 
       # Durable outbound destinations (Kafka + webhook + websocket adapters)
       OUTBOUND_ENABLED: "true"
@@ -531,8 +529,6 @@ services:
       AUTH_SIGNING_KEY_PATH: /app/auth-signing-key.pem
 
       # Sandbox-like local dev: Clerk JWT + membership enforced (see .env.local.example).
-      # Set SECURITY_LOCAL_OPEN=true only for wide-open CLI/app-on-Causet workflows.
-      SECURITY_LOCAL_OPEN: ${SECURITY_LOCAL_OPEN:-false}
       SECURITY_DEV_SKIP_PLATFORMS: ${SECURITY_DEV_SKIP_PLATFORMS:-false}
       SECURITY_REQUIRE_ORG: ${SECURITY_REQUIRE_ORG:-false}
       CLERK_DOMAIN: ${CLERK_DOMAIN:-}
