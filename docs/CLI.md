@@ -74,7 +74,7 @@ When the active environment is **local** (`causet context use env local`):
 - Query service: `http://localhost:8082`
 - Realtime: `http://localhost:8081`
 - Runtime API: `http://localhost:8080`
-- No cloud login required (`SECURITY_LOCAL_OPEN=true` in local compose)
+- Run `causet login` before using the CLI (same as hosted environments)
 
 Hosted environments still require `causet login`.
 
